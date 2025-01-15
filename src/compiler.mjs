@@ -7,28 +7,16 @@
 
 // LLVM => JavaScript compiler, main entry point
 
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-import * as url from 'node:url';
+import {
+  Benchmarker,
+  applySettings,
+  assert,
+  loadDefaultSettings,
+  printErr,
+  read,
+} from './utility.mjs';
 
-import {Benchmarker, applySettings, assert, loadSettingsFile, printErr, read} from './utility.mjs';
-
-function find(filename) {
-  assert(filename);
-  const dirname = url.fileURLToPath(new URL('.', import.meta.url));
-  const prefixes = [dirname, process.cwd()];
-  for (let i = 0; i < prefixes.length; ++i) {
-    const combined = path.join(prefixes[i], filename);
-    if (fs.existsSync(combined)) {
-      return combined;
-    }
-  }
-  return filename;
-}
-
-// Load default settings
-loadSettingsFile(find('settings.js'));
-loadSettingsFile(find('settings_internal.js'));
+loadDefaultSettings();
 
 const argv = process.argv.slice(2);
 const symbolsOnlyArg = argv.indexOf('--symbols-only');
@@ -44,7 +32,7 @@ applySettings(user_settings);
 
 export const symbolsOnly = symbolsOnlyArg != -1;
 
-// In case compiler.js is run directly (as in gen_sig_info)
+// In case compiler.mjs is run directly (as in gen_sig_info)
 // ALL_INCOMING_MODULE_JS_API might not be populated yet.
 if (!ALL_INCOMING_MODULE_JS_API.length) {
   ALL_INCOMING_MODULE_JS_API = INCOMING_MODULE_JS_API;
@@ -95,7 +83,7 @@ try {
     printErr(err);
   } else {
     // Compiler failed on internal compiler error!
-    printErr('Internal compiler error in src/compiler.js!');
+    printErr('Internal compiler error in src/compiler.mjs!');
     printErr('Please create a bug report at https://github.com/emscripten-core/emscripten/issues/');
     printErr(
       'with a log of the build and the input files used to run. Exception message: "' +

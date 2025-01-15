@@ -6,8 +6,8 @@
 import os
 from typing import Union, Dict
 
-TAG = '3.4.0.20240817'
-HASH = 'f75e711ec47c5eb04cff7fef5f2ef6788445bb86ed570a884ccb0e839744c3ed38b5f94808d1fac1417f356177e753e4ac8cafed9ad808d24d8fd08d23ca07f0'
+TAG = '3.4.0.20250112'
+HASH = '55d0828674c185f6ca00f76fcbaaeec8baec26be1507b33d36a2084c6352ca51dd27a61082478998b200e9a388834f2f95d6b00258c303bba1a996e305034a6b'
 
 # contrib port information (required)
 URL = 'https://github.com/pongasoft/emscripten-glfw'
@@ -44,6 +44,7 @@ def get_lib_name(settings):
           ('-nw' if opts['disableWarning'] else '') +
           ('-nj' if opts['disableJoystick'] else '') +
           ('-sw' if opts['disableMultiWindow'] else '') +
+          ('-mt' if settings.PTHREADS else '') +
           '.a')
 
 
@@ -71,6 +72,9 @@ def get(ports, settings, shared):
     if opts['disableMultiWindow']:
       flags += ['-DEMSCRIPTEN_GLFW3_DISABLE_MULTI_WINDOW_SUPPORT']
 
+    if settings.PTHREADS:
+      flags += ['-pthread']
+
     ports.build_port(source_path, final, port_name, includes=source_include_paths, flags=flags)
 
   return [shared.cache.get_lib(get_lib_name(settings), create, what='port')]
@@ -84,6 +88,7 @@ def linker_setup(ports, settings):
   root_path = os.path.join(ports.get_dir(), port_name)
   source_js_path = os.path.join(root_path, 'src', 'js', 'lib_emscripten_glfw3.js')
   settings.JS_LIBRARIES += [source_js_path]
+  settings.MAX_WEBGL_VERSION = 2 # for GLFW_CONTEXT_VERSION_MAJOR to work
 
 
 # Using contrib.glfw3 to avoid installing headers into top level include path

@@ -123,7 +123,7 @@ addToLibrary({
 #endif
           ret[x] = (...args) => {
 #if ASYNCIFY_DEBUG >= 2
-            dbg(`ASYNCIFY: ${'  '.repeat(Asyncify.exportCallStack.length} try ${x}`);
+            dbg(`ASYNCIFY: ${'  '.repeat(Asyncify.exportCallStack.length)} try ${x}`);
 #endif
 #if ASYNCIFY == 1
             Asyncify.exportCallStack.push(x);
@@ -254,7 +254,7 @@ addToLibrary({
     setDataRewindFunc(ptr) {
       var bottomOfCallStack = Asyncify.exportCallStack[0];
 #if ASYNCIFY_DEBUG >= 2
-      dbg('ASYNCIFY: setDataRewindFunc('+ptr+'), bottomOfCallStack is', bottomOfCallStack, new Error().stack);
+      dbg(`ASYNCIFY: setDataRewindFunc(${ptr}), bottomOfCallStack is`, bottomOfCallStack, new Error().stack);
 #endif
       var rewindId = Asyncify.getCallStackId(bottomOfCallStack);
       {{{ makeSetValue('ptr', C_STRUCTS.asyncify_data_s.rewind_id, 'rewindId', 'i32') }}};
@@ -343,8 +343,8 @@ addToLibrary({
 #endif
           Asyncify.state = Asyncify.State.Rewinding;
           runAndAbortIfError(() => _asyncify_start_rewind(Asyncify.currData));
-          if (typeof Browser != 'undefined' && Browser.mainLoop.func) {
-            Browser.mainLoop.resume();
+          if (typeof MainLoop != 'undefined' && MainLoop.func) {
+            MainLoop.resume();
           }
           var asyncWasmReturnValue, isError = false;
           try {
@@ -391,8 +391,8 @@ addToLibrary({
 #if ASYNCIFY_DEBUG
           dbg(`ASYNCIFY: start unwind ${Asyncify.currData}`);
 #endif
-          if (typeof Browser != 'undefined' && Browser.mainLoop.func) {
-            Browser.mainLoop.pause();
+          if (typeof MainLoop != 'undefined' && MainLoop.func) {
+            MainLoop.pause();
           }
           runAndAbortIfError(() => _asyncify_start_unwind(Asyncify.currData));
         }
@@ -470,7 +470,8 @@ addToLibrary({
   emscripten_wget_data__async: true,
   emscripten_wget_data: (url, pbuffer, pnum, perror) => {
     return Asyncify.handleSleep((wakeUp) => {
-      asyncLoad(UTF8ToString(url), (byteArray) => {
+      /* no need for run dependency, this is async but will not do any prepare etc. step */
+      asyncLoad(UTF8ToString(url)).then((byteArray) => {
         // can only allocate the buffer after the wakeUp, not during an asyncing
         var buffer = _malloc(byteArray.length); // must be freed by caller!
         HEAPU8.set(byteArray, buffer);
@@ -481,7 +482,7 @@ addToLibrary({
       }, () => {
         {{{ makeSetValue('perror',  0, '1', 'i32') }}};
         wakeUp();
-      }, true /* no need for run dependency, this is async but will not do any prepare etc. step */ );
+      });
     });
   },
 
@@ -519,9 +520,7 @@ addToLibrary({
     var imports = {'primary': wasmExports};
     // Replace '.wasm' suffix with '.deferred.wasm'.
     var deferred = wasmBinaryFile.slice(0, -5) + '.deferred.wasm';
-    await new Promise((resolve) => {
-      instantiateAsync(null, deferred, imports, resolve);
-    });
+    await instantiateAsync(null, deferred, imports);
   },
 
   $Fibers__deps: ['$Asyncify', 'emscripten_stack_set_limits', '$stackRestore'],
@@ -632,7 +631,7 @@ addToLibrary({
   emscripten_scan_registers: (func) => {
     throw 'Please compile your program with async support in order to use asynchronous operations like emscripten_scan_registers';
   },
-  emscripten_fiber_swap: function(oldFiber, newFiber) {
+  emscripten_fiber_swap: (oldFiber, newFiber) => {
     throw 'Please compile your program with async support in order to use asynchronous operations like emscripten_fiber_swap';
   },
 #endif // ASYNCIFY

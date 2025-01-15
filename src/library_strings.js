@@ -20,14 +20,14 @@ addToLibrary({
    * array that contains uint8 values, returns a copy of that string as a
    * Javascript String object.
    * heapOrArray is either a regular array, or a JavaScript typed array view.
-   * @param {number} idx
+   * @param {number=} idx
    * @param {number=} maxBytesToRead
    * @return {string}
    */`,
 #if TEXTDECODER
   $UTF8ArrayToString__deps: ['$UTF8Decoder'],
 #endif
-  $UTF8ArrayToString: (heapOrArray, idx, maxBytesToRead) => {
+  $UTF8ArrayToString: (heapOrArray, idx = 0, maxBytesToRead = NaN) => {
 #if CAN_ADDRESS_2GB
     idx >>>= 0;
 #endif
@@ -38,7 +38,7 @@ addToLibrary({
     // null terminator by itself.  Also, use the length info to avoid running tiny
     // strings through TextDecoder, since .subarray() allocates garbage.
     // (As a tiny code save trick, compare endPtr against endIdx using a negation,
-    // so that undefined means Infinity)
+    // so that undefined/NaN means Infinity)
     while (heapOrArray[endPtr] && !(endPtr >= endIdx)) ++endPtr;
 #endif // TEXTDECODER
 
@@ -383,9 +383,7 @@ addToLibrary({
 
   // Returns the number of bytes the given Javascript string takes if encoded as
   // a UTF16 byte array, EXCLUDING the null terminator byte.
-  $lengthBytesUTF16: (str) => {
-    return str.length*2;
-  },
+  $lengthBytesUTF16: (str) => str.length*2,
 
   $UTF32ToString: (ptr, maxBytesToRead) => {
 #if ASSERTIONS

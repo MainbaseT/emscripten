@@ -92,10 +92,6 @@ var wasmExports;
 var wasmModule;
 #endif
 
-#if DECLARE_ASM_MODULE_EXPORTS
-<<< WASM_MODULE_EXPORTS_DECLARES >>>
-#endif
-
 #if PTHREADS
 function loadModule() {
   assignWasmImports();
@@ -109,6 +105,10 @@ var imports = {
   '{{{ WASI_MODULE_NAME }}}': wasmImports,
 #endif // MINIFY_WASM_IMPORTED_MODULES
 };
+
+#if SINGLE_FILE && WASM == 1 && !WASM2JS
+Module['wasm'] = base64Decode('<<< WASM_BINARY_DATA >>>');
+#endif
 
 #if MINIMAL_RUNTIME_STREAMING_WASM_INSTANTIATION
 // https://caniuse.com/#feat=wasm and https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/WebAssembly/instantiateStreaming
@@ -183,7 +183,7 @@ WebAssembly.instantiate(Module['wasm'], imports).then((output) => {
 #if !DECLARE_ASM_MODULE_EXPORTS
   exportWasmSymbols(wasmExports);
 #else
-  <<< WASM_MODULE_EXPORTS >>>
+  assignWasmExports(wasmExports);
 #endif
 #if '$wasmTable' in addedLibraryItems
   wasmTable = wasmExports['__indirect_function_table'];

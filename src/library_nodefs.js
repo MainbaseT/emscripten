@@ -19,11 +19,7 @@ addToLibrary({
     isWindows: false,
     staticInit() {
       NODEFS.isWindows = !!process.platform.match(/^win/);
-      var flags = process.binding("constants");
-      // Node.js 4 compatibility: it has no namespaces for constants
-      if (flags["fs"]) {
-        flags = flags["fs"];
-      }
+      var flags = process.binding("constants")["fs"];
       NODEFS.flagsForNodeMap = {
         "{{{ cDefs.O_APPEND }}}": flags["O_APPEND"],
         "{{{ cDefs.O_CREAT }}}": flags["O_CREAT"],
@@ -76,15 +72,14 @@ addToLibrary({
       return node;
     },
     getMode(path) {
-      var stat;
       return NODEFS.tryFSOperation(() => {
-        stat = fs.lstatSync(path);
+        var mode = fs.lstatSync(path).mode;
         if (NODEFS.isWindows) {
-          // Node.js on Windows never represents permission bit 'x', so
-          // propagate read bits to execute bits
-          stat.mode |= (stat.mode & {{{ cDefs.S_IRUSR | cDefs.S_IRGRP | cDefs.S_IROTH }}}) >> 2;
+          // Windows does not report the 'x' permission bit, so propagate read
+          // bits to execute bits.
+          mode |= (mode & {{{ cDefs.S_IRUGO }}}) >> 2;
         }
-        return stat.mode;
+        return mode;
       });
     },
     realPath(node) {
@@ -124,22 +119,13 @@ addToLibrary({
         var stat;
         NODEFS.tryFSOperation(() => stat = fs.lstatSync(path));
         if (NODEFS.isWindows) {
-          // node.js v0.10.20 doesn't report blksize and blocks on Windows. Fake
-          // them with default blksize of 4096.
-          // See http://support.microsoft.com/kb/140365
-          if (!stat.blksize) {
-            stat.blksize = 4096;
-          }
-          if (!stat.blocks) {
-            stat.blocks = (stat.size+stat.blksize-1)/stat.blksize|0;
-          }
-          // Node.js on Windows never represents permission bit 'x', so
-          // propagate read bits to execute bits.
-          stat.mode |= (stat.mode & {{{ cDefs.S_IRUSR | cDefs.S_IRGRP | cDefs.S_IROTH }}}) >> 2;
+          // Windows does not report the 'x' permission bit, so propagate read
+          // bits to execute bits.
+          stat.mode |= (stat.mode & {{{ cDefs.S_IRUGO }}}) >> 2;
         }
         return {
           dev: stat.dev,
-          ino: stat.ino,
+          ino: node.id,
           mode: stat.mode,
           nlink: stat.nlink,
           uid: stat.uid,
@@ -157,13 +143,29 @@ addToLibrary({
         var path = NODEFS.realPath(node);
         NODEFS.tryFSOperation(() => {
           if (attr.mode !== undefined) {
-            fs.chmodSync(path, attr.mode);
+            if (attr.dontFollow) {
+              throw new FS.ErrnoError({{{ cDefs.ENOSYS }}});
+            }
+            var mode = attr.mode;
+            if (NODEFS.isWindows) {
+              // Windows only supports S_IREAD / S_IWRITE (S_IRUSR / S_IWUSR)
+              // https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/chmod-wchmod
+              mode &= {{{ cDefs.S_IRUSR | cDefs.S_IWUSR }}};
+            }
+            fs.chmodSync(path, mode);
             // update the common node structure mode as well
             node.mode = attr.mode;
           }
-          if (attr.timestamp !== undefined) {
-            var date = new Date(attr.timestamp);
-            fs.utimesSync(path, date, date);
+          if (typeof (attr.atime ?? attr.mtime) === "number") {
+            // Unfortunately, we have to stat the current value if we don't want
+            // to change it. On top of that, since the times don't round trip
+            // this will only keep the value nearly unchanged not exactly
+            // unchanged. See:
+            // https://github.com/nodejs/node/issues/56492
+            var stat = () => fs.lstatSync(NODEFS.realPath(node));
+            var atime = new Date(attr.atime ?? stat().atime);
+            var mtime = new Date(attr.mtime ?? stat().mtime);
+            fs.utimesSync(path, atime, mtime);
           }
           if (attr.size !== undefined) {
             fs.truncateSync(path, attr.size);
@@ -191,6 +193,9 @@ addToLibrary({
       rename(oldNode, newDir, newName) {
         var oldPath = NODEFS.realPath(oldNode);
         var newPath = PATH.join2(NODEFS.realPath(newDir), newName);
+        try {
+          FS.unlink(newPath);
+        } catch(e) {}
         NODEFS.tryFSOperation(() => fs.renameSync(oldPath, newPath));
         oldNode.name = newName;
       },
@@ -214,6 +219,13 @@ addToLibrary({
         var path = NODEFS.realPath(node);
         return NODEFS.tryFSOperation(() => fs.readlinkSync(path));
       },
+      statfs(path) {
+        var stats = NODEFS.tryFSOperation(() => fs.statfsSync(path));
+        // Node.js doesn't provide frsize (fragment size). Set it to bsize (block size)
+        // as they're often the same in many file systems. May not be accurate for all.
+        stats.frsize = stats.bsize;
+        return stats;
+      }
     },
     stream_ops: {
       open(stream) {
@@ -236,8 +248,6 @@ addToLibrary({
         stream.shared.refcount++;
       },
       read(stream, buffer, offset, length, position) {
-        // Node.js < 6 compatibility: node errors on 0 length reads
-        if (length === 0) return 0;
         return NODEFS.tryFSOperation(() =>
           fs.readSync(stream.nfd, new Int8Array(buffer.buffer, offset, length), 0, length, position)
         );

@@ -10,35 +10,27 @@ addToLibrary({
     if (!ENVIRONMENT_IS_NODE) {
       throw new Error("NODERAWFS is currently only supported on Node.js environment.")
     }
-    // Use this to reference our in-memory filesystem
-    var VFS = Object.assign({}, FS);
-    // Override the init function with our own
-    FS.init = NODERAWFS.init;`,
-  $NODERAWFS: {
-    init() {
-      var _wrapNodeError = function(func) {
-        return function(...args) {
-          try {
-            return func(...args)
-          } catch (e) {
-            if (e.code) {
-              throw new FS.ErrnoError(ERRNO_CODES[e.code]);
-            }
-            throw e;
+    var _wrapNodeError = function(func) {
+      return function(...args) {
+        try {
+          return func(...args)
+        } catch (e) {
+          if (e.code) {
+            throw new FS.ErrnoError(ERRNO_CODES[e.code]);
           }
+          throw e;
         }
-      };
-
-      // Wrap the whole in-memory filesystem API with
-      // our Node.js based functions
-      for (var _key in NODERAWFS) {
-        /** @suppress {partialAlias} */
-        FS[_key] = _wrapNodeError(NODERAWFS[_key]);
       }
-
-      // Setup the stdin, stdout and stderr devices
-      FS.createStandardStreams();
-    },
+    };
+    // Use this to reference our in-memory filesystem
+    /** @suppress {partialAlias} */
+    var VFS = Object.assign({}, FS);
+    // Wrap the whole in-memory filesystem API with
+    // our Node.js based functions
+    for (var _key in NODERAWFS) {
+      FS[_key] = _wrapNodeError(NODERAWFS[_key]);
+    }`,
+  $NODERAWFS: {
     lookup(parent, name) {
 #if ASSERTIONS
       assert(parent)
@@ -48,7 +40,7 @@ addToLibrary({
     },
     lookupPath(path, opts = {}) {
       if (opts.parent) {
-        path = nodePath.dirname(path);
+        path = PATH.dirname(path);
       }
       var st = fs.lstatSync(path);
       var mode = NODEFS.getMode(path);
@@ -56,9 +48,10 @@ addToLibrary({
     },
     createStandardStreams() {
       // FIXME: tty is set to true to appease isatty(), the underlying ioctl syscalls still needs to be implemented, see issue #22264.
-      FS.createStream({ nfd: 0, position: 0, path: '', flags: 0, tty: true, seekable: false }, 0);
+      FS.createStream({ nfd: 0, position: 0, path: '/dev/stdin', flags: 0, tty: true, seekable: false }, 0);
+      var paths = [,'/dev/stdout', '/dev/stderr'];
       for (var i = 1; i < 3; i++) {
-        FS.createStream({ nfd: i, position: 0, path: '', flags: {{{ cDefs.O_TRUNC | cDefs.O_CREAT | cDefs.O_WRONLY }}}, tty: true, seekable: false }, i);
+        FS.createStream({ nfd: i, position: 0, path: paths[i], flags: {{{ cDefs.O_TRUNC | cDefs.O_CREAT | cDefs.O_WRONLY }}}, tty: true, seekable: false }, i);
       }
     },
     // generic function for all node creation
@@ -78,9 +71,35 @@ addToLibrary({
     readdir(...args) { return ['.', '..'].concat(fs.readdirSync(...args)); },
     unlink(...args) { fs.unlinkSync(...args); },
     readlink(...args) { return fs.readlinkSync(...args); },
-    stat(...args) { return fs.statSync(...args); },
-    lstat(...args) { return fs.lstatSync(...args); },
-    chmod(...args) { fs.chmodSync(...args); },
+    stat(path, dontFollow) {
+      var stat = dontFollow ? fs.lstatSync(path) : fs.statSync(path);
+      if (NODEFS.isWindows) {
+        // Windows does not report the 'x' permission bit, so propagate read
+        // bits to execute bits.
+        stat.mode |= (stat.mode & {{{ cDefs.S_IRUGO }}}) >> 2;
+      }
+      return stat;
+    },
+    statfsStream(stream) {
+      return fs.statfsSync(stream.path);
+    },
+    statfsNode(node) {
+      return fs.statfsSync(node.path);
+    },
+    chmod(path, mode, dontFollow) {
+      mode &= {{{ cDefs.S_IALLUGO }}};
+      if (NODEFS.isWindows) {
+        // Windows only supports S_IREAD / S_IWRITE (S_IRUSR / S_IWUSR)
+        // https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/chmod-wchmod
+        mode &= {{{ cDefs.S_IRUSR | cDefs.S_IWUSR }}};
+      }
+      if (dontFollow && fs.lstatSync(path).isSymbolicLink()) {
+        // Node (and indeed linux) does not support chmod on symlinks
+        // https://nodejs.org/api/fs.html#fslchmodsyncpath-mode
+        throw new FS.ErrnoError({{{ cDefs.EOPNOTSUPP }}});
+      }
+      fs.chmodSync(path, mode);
+    },
     fchmod(fd, mode) {
       var stream = FS.getStreamChecked(fd);
       fs.fchmodSync(stream.nfd, mode);
@@ -99,12 +118,22 @@ addToLibrary({
       var stream = FS.getStreamChecked(fd);
       fs.ftruncateSync(stream.nfd, len);
     },
-    utime(path, atime, mtime) { fs.utimesSync(path, atime/1000, mtime/1000); },
+    utime(path, atime, mtime) {
+      // null here for atime or mtime means UTIME_OMIT was passed.  Since node
+      // doesn't support this concept we need to first find the existing
+      // timestamps in order to preserve them.
+      if ((atime === null) || (mtime === null)) {
+        var st = fs.statSync(path);
+        atime ||= st.atimeMs;
+        mtime ||= st.mtimeMs;
+      }
+      fs.utimesSync(path, atime/1000, mtime/1000);
+    },
     open(path, flags, mode) {
       if (typeof flags == "string") {
         flags = FS_modeStringToFlags(flags)
       }
-      var pathTruncated = path.split('/').map(function(s) { return s.substr(0, 255); }).join('/');
+      var pathTruncated = path.split('/').map((s) => s.substr(0, 255)).join('/');
       var nfd = fs.openSync(pathTruncated, NODEFS.flagsForNode(flags), mode);
       var st = fs.fstatSync(nfd);
       if (flags & {{{ cDefs.O_DIRECTORY }}} && !st.isDirectory()) {

@@ -57,7 +57,6 @@ export const LibraryManager = {
       'library_html5.js',
       'library_stack_trace.js',
       'library_wasi.js',
-      'library_makeDynCall.js',
       'library_eventloop.js',
       'library_promise.js',
     ];
@@ -206,7 +205,7 @@ export const LibraryManager = {
       libraries.push('library_little_endian_heap.js');
     }
 
-    // Add all user specified --js-library files to the link.
+    // Add all user specified JS library files to the link.
     // These must be added last after all Emscripten-provided system libraries
     // above, so that users can override built-in JS library symbols in their
     // own code.
@@ -385,6 +384,9 @@ function exportRuntime() {
     // If requested to be exported, export it.  HEAP objects are exported
     // separately in updateMemoryViews
     if (EXPORTED_RUNTIME_METHODS.has(name) && !name.startsWith('HEAP')) {
+      if (MODULARIZE === 'instance') {
+        return `__exp_${name} = ${name};`;
+      }
       return `Module['${name}'] = ${name};`;
     }
   }
@@ -441,11 +443,6 @@ function exportRuntime() {
   if (STACK_OVERFLOW_CHECK) {
     runtimeElements.push('writeStackCookie');
     runtimeElements.push('checkStackCookie');
-  }
-
-  if (SUPPORT_BASE64_EMBEDDING) {
-    runtimeElements.push('intArrayFromBase64');
-    runtimeElements.push('tryParseAsDataURI');
   }
 
   if (RETAIN_COMPILER_SETTINGS) {

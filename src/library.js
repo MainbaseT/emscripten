@@ -62,7 +62,6 @@ addToLibrary({
     }
 #endif
     HEAPU8.fill(0, address, address + size);
-    return address;
   },
 
 #if SAFE_HEAP
@@ -86,7 +85,7 @@ addToLibrary({
 #if PTHREADS
     '$exitOnMainThread',
 #endif
-#if PTHREADS_DEBUG
+#if PTHREADS_DEBUG || ASSERTIONS
     '$runtimeKeepaliveCounter',
 #endif
   ],
@@ -186,7 +185,7 @@ addToLibrary({
   // it. Returns 1 on success, 0 on error.
   $growMemory: (size) => {
     var b = wasmMemory.buffer;
-    var pages = (size - b.byteLength + {{{ WASM_PAGE_SIZE - 1 }}}) / {{{ WASM_PAGE_SIZE }}};
+    var pages = ((size - b.byteLength + {{{ WASM_PAGE_SIZE - 1 }}}) / {{{ WASM_PAGE_SIZE }}}) | 0;
 #if RUNTIME_DEBUG
     dbg(`growMemory: ${size} (+${size - b.byteLength} bytes / ${pages} pages)`);
 #endif
@@ -195,7 +194,7 @@ addToLibrary({
 #endif
     try {
       // round size grow request up to wasm page size (fixed 64KB per spec)
-      wasmMemory.grow(pages); // .grow() takes a delta compared to the previous size
+      wasmMemory.grow({{{ toIndexType('pages') }}}); // .grow() takes a delta compared to the previous size
       updateMemoryViews();
 #if MEMORYPROFILER
       if (typeof emscriptenMemoryProfiler != 'undefined') {
@@ -364,15 +363,14 @@ addToLibrary({
         var signalToNumber = (sig) => {
           // implement only the most common ones, and fallback to SIGINT
           switch (sig) {
-            case 'SIGHUP': return 1;
-            case 'SIGINT': return 2;
-            case 'SIGQUIT': return 3;
-            case 'SIGFPE': return 8;
-            case 'SIGKILL': return 9;
-            case 'SIGALRM': return 14;
-            case 'SIGTERM': return 15;
+            case 'SIGHUP': return {{{ cDefs.SIGHUP }}};
+            case 'SIGQUIT': return {{{ cDefs.SIGQUIT }}};
+            case 'SIGFPE': return {{{ cDefs.SIGFPE }}};
+            case 'SIGKILL': return {{{ cDefs.SIGKILL }}};
+            case 'SIGALRM': return {{{ cDefs.SIGALRM }}};
+            case 'SIGTERM': return {{{ cDefs.SIGTERM }}};
+            default: return {{{ cDefs.SIGINT }}};
           }
-          return 2; // SIGINT
         }
         return _W_EXITCODE(0, signalToNumber(ret.signal));
       }
@@ -395,59 +393,25 @@ addToLibrary({
   // Used to implement the native `abort` symbol.  Note that we use the
   // JavaScript `abort` helper in order to implement this function, but we use a
   // distinct name here to avoid confusing the two.
-  _abort_js: () => {
+  _abort_js: () =>
 #if ASSERTIONS
-    abort('native code called abort()');
+    abort('native code called abort()'),
 #else
-    abort('');
+    abort(''),
 #endif
-  },
 #endif
 
   // This object can be modified by the user during startup, which affects
   // the initial values of the environment accessible by getenv.
   $ENV: {},
 
-  // In -Oz builds, we replace memcpy() altogether with a non-unrolled wasm
-  // variant, so we should never emit _emscripten_memcpy_js() in the build.
-  // In STANDALONE_WASM we avoid the _emscripten_memcpy_js dependency so keep
-  // the wasm file standalone.
-  // In BULK_MEMORY mode we include native versions of these functions based
-  // on memory.fill and memory.copy.
-  // In MAIN_MODULE=1 or EMCC_FORCE_STDLIBS mode all of libc is force included
-  // so we cannot override parts of it, and therefore cannot use libc_optz.
-#if (SHRINK_LEVEL < 2 || LINKABLE || process.env.EMCC_FORCE_STDLIBS) && !STANDALONE_WASM && !BULK_MEMORY
-
-#if MIN_CHROME_VERSION < 45 || MIN_FIREFOX_VERSION < 34 || MIN_SAFARI_VERSION < 100101
-  // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/TypedArray/copyWithin lists browsers that support TypedArray.prototype.copyWithin, but it
-  // has outdated information for Safari, saying it would not support it.
-  // https://github.com/WebKit/webkit/commit/24a800eea4d82d6d595cdfec69d0f68e733b5c52#diff-c484911d8df319ba75fce0d8e7296333R1 suggests support was added on Aug 28, 2015.
-  // Manual testing suggests:
-  //   Safari/601.1 Version/9.0 on iPhone 4s with iOS 9.3.6 (released September 30, 2015) does not support copyWithin.
-  // but the following systems do:
-  //   AppleWebKit/602.2.14 Safari/602.1 Version/10.0 Mobile/14B100 iPhone OS 10_1_1 on iPhone 5s with iOS 10.1.1 (released October 31, 2016)
-  //   AppleWebKit/603.3.8 Safari/602.1 Version/10.0 on iPhone 5 with iOS 10.3.4 (released July 22, 2019)
-  //   AppleWebKit/605.1.15 iPhone OS 12_3_1 Version/12.1.1 Safari/604.1 on iPhone SE with iOS 12.3.1
-  //   AppleWebKit/605.1.15 Safari/604.1 Version/13.0.4 iPhone OS 13_3 on iPhone 6s with iOS 13.3
-  //   AppleWebKit/605.1.15 Version/13.0.3 Intel Mac OS X 10_15_1 on Safari 13.0.3 (15608.3.10.1.4) on macOS Catalina 10.15.1
-  // Hence the support status of .copyWithin() for Safari version range [10.0.0, 10.1.0] is unknown.
-  _emscripten_memcpy_js: `= Uint8Array.prototype.copyWithin
-    ? (dest, src, num) => HEAPU8.copyWithin(dest, src, src + num)
-    : (dest, src, num) => HEAPU8.set(HEAPU8.subarray(src, src+num), dest)`,
-#else
-  _emscripten_memcpy_js: (dest, src, num) => HEAPU8.copyWithin(dest, src, src + num),
-#endif
-
-#endif
-
 #if !STANDALONE_WASM
   // ==========================================================================
   // assert.h
   // ==========================================================================
 
-  __assert_fail: (condition, filename, line, func) => {
-    abort(`Assertion failed: ${UTF8ToString(condition)}, at: ` + [filename ? UTF8ToString(filename) : 'unknown filename', line, func ? UTF8ToString(func) : 'unknown function']);
-  },
+  __assert_fail: (condition, filename, line, func) =>
+    abort(`Assertion failed: ${UTF8ToString(condition)}, at: ` + [filename ? UTF8ToString(filename) : 'unknown filename', line, func ? UTF8ToString(func) : 'unknown function']),
 #endif
 
 #if STACK_OVERFLOW_CHECK >= 2
@@ -664,9 +628,7 @@ addToLibrary({
   $strError: (errno) => errno + '',
 #else
   $strError__deps: ['strerror', '$UTF8ToString'],
-  $strError: (errno) => {
-    return UTF8ToString(_strerror(errno));
-  },
+  $strError: (errno) => UTF8ToString(_strerror(errno)),
 #endif
 
 #if PROXY_POSIX_SOCKETS == 0
@@ -683,9 +645,8 @@ addToLibrary({
     }
     return (b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24)) >>> 0;
   },
-  $inetNtop4: (addr) => {
-    return (addr & 0xff) + '.' + ((addr >> 8) & 0xff) + '.' + ((addr >> 16) & 0xff) + '.' + ((addr >> 24) & 0xff)
-  },
+  $inetNtop4: (addr) =>
+    (addr & 0xff) + '.' + ((addr >> 8) & 0xff) + '.' + ((addr >> 16) & 0xff) + '.' + ((addr >> 24) & 0xff),
   $inetPton6__deps: ['htons', '$jstoi_q'],
   $inetPton6: (str) => {
     var words;
@@ -1074,7 +1035,7 @@ addToLibrary({
         if (family === {{{ cDefs.AF_INET }}}) {
           addr = _htonl({{{ cDefs.INADDR_LOOPBACK }}});
         } else {
-          addr = [0, 0, 0, 1];
+          addr = [0, 0, 0, _htonl(1)];
         }
       }
       ai = allocaddrinfo(family, type, proto, null, addr, port);
@@ -1294,65 +1255,6 @@ addToLibrary({
 
 #endif // PROXY_POSIX_SOCKETS == 0
 
-  // random.h
-
-  $initRandomFill: () => {
-    if (typeof crypto == 'object' && typeof crypto['getRandomValues'] == 'function') {
-      // for modern web browsers
-#if SHARED_MEMORY
-      // like with most Web APIs, we can't use Web Crypto API directly on shared memory,
-      // so we need to create an intermediate buffer and copy it to the destination
-      return (view) => (
-        view.set(crypto.getRandomValues(new Uint8Array(view.byteLength))),
-        // Return the original view to match modern native implementations.
-        view
-      );
-#else
-      return (view) => crypto.getRandomValues(view);
-#endif
-    } else
-#if ENVIRONMENT_MAY_BE_NODE
-    if (ENVIRONMENT_IS_NODE) {
-      // for nodejs with or without crypto support included
-      try {
-        var crypto_module = require('crypto');
-        var randomFillSync = crypto_module['randomFillSync'];
-        if (randomFillSync) {
-          // nodejs with LTS crypto support
-          return (view) => crypto_module['randomFillSync'](view);
-        }
-        // very old nodejs with the original crypto API
-        var randomBytes = crypto_module['randomBytes'];
-        return (view) => (
-          view.set(randomBytes(view.byteLength)),
-          // Return the original view to match modern native implementations.
-          view
-        );
-      } catch (e) {
-        // nodejs doesn't have crypto support
-      }
-    }
-#endif // ENVIRONMENT_MAY_BE_NODE
-    // we couldn't find a proper implementation, as Math.random() is not suitable for /dev/random, see emscripten-core/emscripten/pull/7096
-#if ASSERTIONS
-    abort('no cryptographic support found for randomDevice. consider polyfilling it if you want to use something insecure like Math.random(), e.g. put this in a --pre-js: var crypto = { getRandomValues: (array) => { for (var i = 0; i < array.length; i++) array[i] = (Math.random()*256)|0 } };');
-#else
-    abort('initRandomDevice');
-#endif
-  },
-
-  $randomFill__deps: ['$initRandomFill'],
-  $randomFill: (view) => {
-    // Lazily init on the first invocation.
-    return (randomFill = initRandomFill())(view);
-  },
-
-  getentropy__deps: ['$randomFill'],
-  getentropy: (buffer, size) => {
-    randomFill(HEAPU8.subarray(buffer, buffer + size));
-    return 0;
-  },
-
   $timers: {},
 
   // Helper function for setitimer that registers timers with the eventloop.
@@ -1429,21 +1331,18 @@ addToLibrary({
 
   emscripten_random: () => Math.random(),
 
-  emscripten_get_now: `;
-#if ENVIRONMENT_MAY_BE_NODE && MIN_NODE_VERSION < 160000
-    // The performance global was added to node in v16.0.0:
-    // https://nodejs.org/api/globals.html#performance
-    if (ENVIRONMENT_IS_NODE) {
-      global.performance = require('perf_hooks').performance;
-    }
-#endif
+  emscripten_date_now: () => Date.now(),
+
+  emscripten_performance_now: () => {{{ getPerformanceNow() }}}(),
+
 #if PTHREADS && !AUDIO_WORKLET
-    // Pthreads need their clocks synchronized to the execution of the main
-    // thread, so, when using them, make sure to adjust all timings to the
-    // respective time origins.
-    _emscripten_get_now = () => performance.timeOrigin + {{{ getPerformanceNow() }}}();
+  // Pthreads need their clocks synchronized to the execution of the main
+  // thread, so, when using them, make sure to adjust all timings to the
+  // respective time origins.
+  emscripten_get_now: () => performance.timeOrigin + {{{ getPerformanceNow() }}}(),
 #else
 #if MIN_FIREFOX_VERSION <= 14 || MIN_CHROME_VERSION <= 23 || MIN_SAFARI_VERSION <= 80400 || AUDIO_WORKLET // https://caniuse.com/#feat=high-resolution-time
+  emscripten_get_now: `;
     // AudioWorkletGlobalScope does not have performance.now()
     // (https://github.com/WebAudio/web-audio-api/issues/2527), so if building
     // with
@@ -1457,14 +1356,14 @@ addToLibrary({
     } else {
       _emscripten_get_now = Date.now;
     }
-#else
-    // Modern environment where performance.now() is supported:
-    // N.B. a shorter form "_emscripten_get_now = performance.now;" is
-    // unfortunately not allowed even in current browsers (e.g. FF Nightly 75).
-    _emscripten_get_now = () => {{{ getPerformanceNow() }}}();
-#endif
-#endif
 `,
+#else
+  // Modern environment where performance.now() is supported:
+  // N.B. a shorter form "_emscripten_get_now = performance.now;" is
+  // unfortunately not allowed even in current browsers (e.g. FF Nightly 75).
+  emscripten_get_now: () => {{{ getPerformanceNow() }}}(),
+#endif
+#endif
 
   emscripten_get_now_res: () => { // return resolution of get_now, in nanoseconds
 #if ENVIRONMENT_MAY_BE_NODE
@@ -1542,7 +1441,7 @@ addToLibrary({
   emscripten_log__deps: ['$formatString', '$emscriptenLog'],
   emscripten_log: (flags, format, varargs) => {
     var result = formatString(format, varargs);
-    var str = UTF8ArrayToString(result, 0);
+    var str = UTF8ArrayToString(result);
     emscriptenLog(flags, str);
   },
 
@@ -1559,8 +1458,7 @@ addToLibrary({
     var ret = getCompilerSetting(name);
     if (typeof ret == 'number' || typeof ret == 'boolean') return ret;
 
-    if (!_emscripten_get_compiler_setting.cache) _emscripten_get_compiler_setting.cache = {};
-    var cache = _emscripten_get_compiler_setting.cache;
+    var cache = _emscripten_get_compiler_setting.cache ??= {};
     var fullret = cache[name];
     if (fullret) return fullret;
     return cache[name] = stringToNewUTF8(ret);
@@ -1571,7 +1469,7 @@ addToLibrary({
 
   emscripten_has_asyncify: () => {{{ ASYNCIFY }}},
 
-  emscripten_debugger: function() { debugger },
+  emscripten_debugger: () => { debugger },
 
   emscripten_print_double__deps: ['$stringToUTF8', '$lengthBytesUTF8'],
   emscripten_print_double: (x, to, max) => {
@@ -1582,21 +1480,26 @@ addToLibrary({
 
 #if USE_ASAN || USE_LSAN || UBSAN_RUNTIME
   // When lsan or asan is enabled withBuiltinMalloc temporarily replaces calls
-  // to malloc, free, and memalign.
-  $withBuiltinMalloc__deps: ['emscripten_builtin_malloc', 'emscripten_builtin_free', 'emscripten_builtin_memalign'
-                            ],
+  // to malloc, calloc, free, and memalign.
+  $withBuiltinMalloc__deps: [
+    'malloc', 'calloc', 'free', 'memalign',
+    'emscripten_builtin_malloc', 'emscripten_builtin_free', 'emscripten_builtin_memalign', 'emscripten_builtin_calloc'
+  ],
   $withBuiltinMalloc__docs: '/** @suppress{checkTypes} */',
   $withBuiltinMalloc: (func) => {
     var prev_malloc = typeof _malloc != 'undefined' ? _malloc : undefined;
+    var prev_calloc = typeof _calloc != 'undefined' ? _calloc : undefined;
     var prev_memalign = typeof _memalign != 'undefined' ? _memalign : undefined;
     var prev_free = typeof _free != 'undefined' ? _free : undefined;
     _malloc = _emscripten_builtin_malloc;
+    _calloc = _emscripten_builtin_calloc;
     _memalign = _emscripten_builtin_memalign;
     _free = _emscripten_builtin_free;
     try {
       return func();
     } finally {
       _malloc = prev_malloc;
+      _calloc = prev_calloc;
       _memalign = prev_memalign;
       _free = prev_free;
     }
@@ -1788,9 +1691,7 @@ addToLibrary({
     return ___cxa_throw(ex, 0, 0);
   },
 
-  _Unwind_DeleteException: (ex) => {
-    err('TODO: Unwind_DeleteException');
-  },
+  _Unwind_DeleteException: (ex) => err('TODO: Unwind_DeleteException'),
 #endif
 
   // special runtime support
@@ -1807,29 +1708,28 @@ addToLibrary({
   },
 #endif
 
-  $getExecutableName: () => {
 #if MINIMAL_RUNTIME // MINIMAL_RUNTIME does not have a global runtime variable thisProgram
+  $getExecutableName: () => {
 #if ENVIRONMENT_MAY_BE_NODE
     if (ENVIRONMENT_IS_NODE && process.argv.length > 1) {
       return process.argv[1].replace(/\\/g, '/');
     }
 #endif
     return "./this.program";
-#else
-    return thisProgram || './this.program';
-#endif
   },
+#else
+  $getExecutableName: () => thisProgram || './this.program',
+#endif
 
-  $listenOnce: (object, event, func) => {
+  $listenOnce: (object, event, func) =>
 #if MIN_CHROME_VERSION < 55 || MIN_FIREFOX_VERSION < 50 // https://developer.mozilla.org/en-US/docs/Web/API/EventTarget/addEventListener
     object.addEventListener(event, function handler() {
       func();
       object.removeEventListener(event, handler);
-    });
+    }),
 #else
-    object.addEventListener(event, func, { 'once': true });
+    object.addEventListener(event, func, { 'once': true }),
 #endif
-  },
 
   // Receives a Web Audio context plus a set of elements to listen for user
   // input events on, and registers a context resume() for them. This lets
@@ -1860,9 +1760,6 @@ addToLibrary({
   $dynCalls: '{}',
 #endif
   $dynCallLegacy__deps: [
-#if MAIN_MODULE == 1
-    '$createDyncallWrapper'
-#endif
 #if MINIMAL_RUNTIME
     '$dynCalls',
 #endif
@@ -1892,11 +1789,6 @@ addToLibrary({
 #if MINIMAL_RUNTIME
     var f = dynCalls[sig];
 #else
-#if MAIN_MODULE == 1
-    if (!('dynCall_' + sig in Module)) {
-      Module['dynCall_' + sig] = createDyncallWrapper(sig);
-    }
-#endif
     var f = Module['dynCall_' + sig];
 #endif
     return f(ptr, ...args);
@@ -1967,25 +1859,29 @@ addToLibrary({
   $setWasmTableEntry__internal: true,
   $setWasmTableEntry__deps: ['$wasmTableMirror', '$wasmTable'],
   $setWasmTableEntry: (idx, func) => {
-    wasmTable.set(idx, func);
+    /** @suppress {checkTypes} */
+    wasmTable.set({{{ toIndexType('idx') }}}, func);
     // With ABORT_ON_WASM_EXCEPTIONS wasmTable.get is overridden to return wrapped
     // functions so we need to call it here to retrieve the potential wrapper correctly
     // instead of just storing 'func' directly into wasmTableMirror
-    wasmTableMirror[idx] = wasmTable.get(idx);
+    /** @suppress {checkTypes} */
+    wasmTableMirror[idx] = wasmTable.get({{{ toIndexType('idx') }}});
   },
 
   $getWasmTableEntry__internal: true,
   $getWasmTableEntry__deps: ['$wasmTableMirror', '$wasmTable'],
   $getWasmTableEntry: (funcPtr) => {
 #if MEMORY64
-    // Function pointers are 64-bit, but wasmTable.get() requires a Number.
+    // Function pointers should show up as numbers, even under wasm64, but
+    // we still have some places where bigint values can flow here.
     // https://github.com/emscripten-core/emscripten/issues/18200
     funcPtr = Number(funcPtr);
 #endif
     var func = wasmTableMirror[funcPtr];
     if (!func) {
       if (funcPtr >= wasmTableMirror.length) wasmTableMirror.length = funcPtr + 1;
-      wasmTableMirror[funcPtr] = func = wasmTable.get(funcPtr);
+      /** @suppress {checkTypes} */
+      wasmTableMirror[funcPtr] = func = wasmTable.get({{{ toIndexType('funcPtr') }}});
 #if ASYNCIFY == 2
       if (Asyncify.isAsyncExport(func)) {
         wasmTableMirror[funcPtr] = func = Asyncify.makeAsyncFunction(func);
@@ -1993,26 +1889,24 @@ addToLibrary({
 #endif
     }
 #if ASSERTIONS && ASYNCIFY != 2 // With JSPI the function stored in the table will be a wrapper.
-    assert(wasmTable.get(funcPtr) == func, 'JavaScript-side Wasm function table mirror is out of date!');
+    /** @suppress {checkTypes} */
+    assert(wasmTable.get({{{ toIndexType('funcPtr') }}}) == func, 'JavaScript-side Wasm function table mirror is out of date!');
 #endif
     return func;
   },
 
 #else
 
+  $setWasmTableEntry__docs: '/** @suppress{checkTypes} */',
   $setWasmTableEntry__deps: ['$wasmTable'],
-  $setWasmTableEntry: (idx, func) => wasmTable.set(idx, func),
+  $setWasmTableEntry: (idx, func) => wasmTable.set({{{ toIndexType('idx') }}}, func),
 
+  $getWasmTableEntry__docs: '/** @suppress{checkTypes} */',
   $getWasmTableEntry__deps: ['$wasmTable'],
   $getWasmTableEntry: (funcPtr) => {
-#if MEMORY64
-    // Function pointers are 64-bit, but wasmTable.get() requires a Number.
-    // https://github.com/emscripten-core/emscripten/issues/18200
-    funcPtr = Number(funcPtr);
-#endif
     // In -Os and -Oz builds, do not implement a JS side wasm table mirror for small
     // code size, but directly access wasmTable, which is a bit slower as uncached.
-    return wasmTable.get(funcPtr);
+    return wasmTable.get({{{ toIndexType('funcPtr') }}});
   },
 #endif // SHRINK_LEVEL == 0
 
@@ -2022,7 +1916,9 @@ addToLibrary({
     throw 'unwind';
   },
 
-  _emscripten_runtime_keepalive_clear__proxy: 'sync',
+#if !MINIMAL_RUNTIME
+  _emscripten_runtime_keepalive_clear__deps: ['$runtimeKeepaliveCounter'],
+#endif
   _emscripten_runtime_keepalive_clear: () => {
 #if isSymbolNeeded('$noExitRuntime')
     noExitRuntime = false;
@@ -2035,9 +1931,6 @@ addToLibrary({
   emscripten_force_exit__deps: ['exit', '_emscripten_runtime_keepalive_clear',
 #if !EXIT_RUNTIME && ASSERTIONS
     '$warnOnce',
-#endif
-#if !MINIMAL_RUNTIME
-    '$runtimeKeepaliveCounter',
 #endif
   ],
   emscripten_force_exit__proxy: 'sync',
@@ -2061,14 +1954,16 @@ addToLibrary({
 #if ASSERTIONS || RUNTIME_DEBUG
   emscripten_dbg: (str) => dbg(UTF8ToString(str)),
   emscripten_dbgn: (str, len) => dbg(UTF8ToString(str, len)),
+
+  emscripten_dbg_backtrace: (str) => {
+    dbg(UTF8ToString(str) + '\n' + new Error().stack);
+  },
 #endif
 
   // Use program_invocation_short_name and program_invocation_name in compiled
   // programs. This function is for implementing them.
   _emscripten_get_progname__deps: ['$getExecutableName', '$stringToUTF8'],
-  _emscripten_get_progname: (str, len) => {
-    stringToUTF8(getExecutableName(), str, len);
-  },
+  _emscripten_get_progname: (str, len) => stringToUTF8(getExecutableName(), str, len),
 
   emscripten_console_log: (str) => {
 #if ASSERTIONS
@@ -2089,6 +1984,13 @@ addToLibrary({
     assert(typeof str == 'number');
 #endif
     console.error(UTF8ToString(str));
+  },
+
+  emscripten_console_trace: (str) => {
+#if ASSERTIONS
+    assert(typeof str == 'number');
+#endif
+    console.trace(UTF8ToString(str));
   },
 
   emscripten_throw_number: (number) => {
@@ -2132,10 +2034,20 @@ addToLibrary({
   $runtimeKeepaliveCounter__internal: true,
   $runtimeKeepaliveCounter: 0,
 
-  $keepRuntimeAlive__deps: ['$runtimeKeepaliveCounter'],
 #if isSymbolNeeded('$noExitRuntime')
+  // If the `noExitRuntime` symbol is included in the build then
+  // keepRuntimeAlive is always conditional since its state can change
+  // at runtime.
+  $keepRuntimeAlive__deps: ['$runtimeKeepaliveCounter'],
   $keepRuntimeAlive: () => noExitRuntime || runtimeKeepaliveCounter > 0,
+#elif !EXIT_RUNTIME && !PTHREADS
+  // When `noExitRuntime` is not included and EXIT_RUNTIME=0 then we know the
+  // runtime can never exit (i.e. should always be kept alive).
+  // However, since pthreads themselves always need to be able to exit we
+  // have to track `runtimeKeepaliveCounter` in that case.
+  $keepRuntimeAlive: () => true,
 #else
+  $keepRuntimeAlive__deps: ['$runtimeKeepaliveCounter'],
   $keepRuntimeAlive: () => runtimeKeepaliveCounter > 0,
 #endif
 
@@ -2206,7 +2118,7 @@ addToLibrary({
       return;
     }
 #endif
-#if RUNTIME_DEBUG
+#if RUNTIME_DEBUG >= 2
     dbg(`maybeExit: user callback done: runtimeKeepaliveCounter=${runtimeKeepaliveCounter}`);
 #endif
     if (!keepRuntimeAlive()) {
@@ -2237,26 +2149,12 @@ addToLibrary({
     return x.startsWith('dynCall_') ? x : '_' + x;
   },
 
-  $asyncLoad__docs: '/** @param {boolean=} noRunDep */',
-  $asyncLoad: (url, onload, onerror, noRunDep) => {
-    var dep = !noRunDep ? getUniqueRunDependency(`al ${url}`) : '';
-    readAsync(url).then(
-      (arrayBuffer) => {
-#if ASSERTIONS
-        assert(arrayBuffer, `Loading data file "${url}" failed (no arrayBuffer).`);
-#endif
-        onload(new Uint8Array(arrayBuffer));
-        if (dep) removeRunDependency(dep);
-      },
-      (err) => {
-        if (onerror) {
-          onerror();
-        } else {
-          throw `Loading data file "${url}" failed.`;
-        }
-      }
-    );
-    if (dep) addRunDependency(dep);
+  $asyncLoad: async (url) => {
+    var arrayBuffer = await readAsync(url);
+  #if ASSERTIONS
+    assert(arrayBuffer, `Loading data file "${url}" failed (no arrayBuffer).`);
+  #endif
+    return new Uint8Array(arrayBuffer);
   },
 
   $alignMemory: (size, alignment) => {
@@ -2273,8 +2171,8 @@ addToLibrary({
 #if hasExportedSymbol('emscripten_builtin_memalign')
     size = alignMemory(size, {{{ WASM_PAGE_SIZE }}});
     var ptr = _emscripten_builtin_memalign({{{ WASM_PAGE_SIZE }}}, size);
-    if (!ptr) return 0;
-    return zeroMemory(ptr, size);
+    if (ptr) zeroMemory(ptr, size);
+    return ptr;
 #elif ASSERTIONS
     abort('internal error: mmapAlloc called but `emscripten_builtin_memalign` native symbol not exported');
 #else
@@ -2344,12 +2242,8 @@ addToLibrary({
   },
 
   $HandleAllocator: class {
-    constructor() {
-      // TODO(https://github.com/emscripten-core/emscripten/issues/21414):
-      // Use inline field declarations.
-      this.allocated = [undefined];
-      this.freelist = [];
-    }
+    allocated = [undefined];
+    freelist = [];
     get(id) {
 #if ASSERTIONS
       assert(this.allocated[id] !== undefined, `invalid handle: ${id}`);
@@ -2382,9 +2276,16 @@ addToLibrary({
 #if RELOCATABLE
   // In RELOCATABLE mode we create the table in JS.
   $wasmTable: `=new WebAssembly.Table({
-  'initial': {{{ INITIAL_TABLE }}},
+  'initial': {{{ toIndexType(INITIAL_TABLE) }}},
 #if !ALLOW_TABLE_GROWTH
-  'maximum': {{{ INITIAL_TABLE }}},
+  'maximum': {{{ toIndexType(INITIAL_TABLE) }}},
+#endif
+#if MEMORY64 == 1
+  'address': 'i64',
+   // TODO(sbc): remove this alias for 'address' once both firefox and
+   // chrome roll out the spec change.
+   // See https://github.com/WebAssembly/memory64/pull/92
+  'index': 'i64',
 #endif
   'element': 'anyfunc'
 });
