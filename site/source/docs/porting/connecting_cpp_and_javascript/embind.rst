@@ -597,6 +597,7 @@ implemented in JavaScript.
 .. code:: cpp
 
     struct Interface {
+        virtual ~Interface() {}
         virtual void invoke(const std::string& str) = 0;
     };
 
@@ -859,7 +860,7 @@ Class properties can be defined several ways as seen below.
         class_<Person>("Person")
             .constructor<>()
             // Bind directly to a class member with automatically generated getters/setters using a
-            // reference return policy so the object does not need to be deleted JS.
+            // reference return policy so the object does not need to be deleted from JS.
             .property("location", &Person::location, return_value_policy::reference())
             // Same as above, but this will return a copy and the object must be deleted or it will
             // leak!
@@ -1070,7 +1071,7 @@ Out of the box, *embind* provides converters for many standard C++ types:
 \*\*Requires BigInt support to be enabled with the `-sWASM_BIGINT` flag.
 
 For convenience, *embind* provides factory functions to register
-``std::vector<T>`` (:cpp:func:`register_vector`), ``std::map<K, V>``
+``std::vector<T, class Allocator=std::allocator<T>>`` (:cpp:func:`register_vector`), ``std::map<K, V, class Compare=std::less<K>, class Allocator=std::allocator<std::pair<const K, V>>>``
 (:cpp:func:`register_map`), and ``std::optional<T>`` (:cpp:func:`register_optional`) types:
 
 .. code:: cpp
@@ -1078,7 +1079,7 @@ For convenience, *embind* provides factory functions to register
     EMSCRIPTEN_BINDINGS(stl_wrappers) {
         register_vector<int>("VectorInt");
         register_map<int,int>("MapIntInt");
-        register_optional<std::string>("Optional);
+        register_optional<std::string>();
     }
 
 A full example is shown below:
@@ -1210,6 +1211,16 @@ registered using :cpp:func:`EMSCRIPTEN_DECLARE_VAL_TYPE` in combination with
         function("function_with_callback_param", &function_with_callback_param);
         register_type<CallbackType>("(message: string) => void");
     }
+
+
+``nonnull`` Pointers
+--------------------
+
+C++ functions that return pointers generate TS definitions with ``<SomeClass> |
+null`` to allow ``nullptr`` by default. If the C++ function is guaranteed to
+return a valid object, then a policy parameter of ``nonnull<ret_val>()`` can be
+added to the function binding to omit ``| null`` from TS. This avoids having to
+handle the ``null`` case in TS.
 
 Performance
 ===========

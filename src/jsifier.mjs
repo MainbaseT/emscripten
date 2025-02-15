@@ -7,10 +7,15 @@
 // Convert analyzed data to javascript. Everything has already been calculated
 // before this stage, which just does the final conversion to JavaScript.
 
+import assert from 'node:assert';
+import * as fs from 'node:fs/promises';
 import {
   ATEXITS,
   ATINITS,
+  ATPOSTCTORS,
+  ATPRERUNS,
   ATMAINS,
+  ATPOSTRUNS,
   defineI64Param,
   indentify,
   makeReturn64,
@@ -21,18 +26,17 @@ import {
 } from './parseTools.mjs';
 import {
   addToCompileTimeContext,
-  assert,
   error,
   errorOccured,
   isDecorator,
   isJsOnlySymbol,
   compileTimeContext,
-  print,
   printErr,
-  read,
+  readFile,
   warn,
   warnOnce,
   warningOccured,
+  localFile,
 } from './utility.mjs';
 import {LibraryManager, librarySymbols} from './modules.mjs';
 
@@ -51,7 +55,7 @@ function mangleCSymbolName(f) {
   if (f === '__main_argc_argv') {
     f = 'main';
   }
-  return f[0] == '$' ? f.substr(1) : '_' + f;
+  return f[0] == '$' ? f.slice(1) : '_' + f;
 }
 
 // Splits out items that pass filter. Returns also the original sans the filtered
@@ -112,7 +116,7 @@ function resolveAlias(symbol) {
   return symbol;
 }
 
-function getTransitiveDeps(symbol, debug) {
+function getTransitiveDeps(symbol) {
   // TODO(sbc): Use some kind of cache to avoid quadratic behaviour here.
   const transitiveDeps = new Set();
   const seen = new Set();
@@ -137,36 +141,51 @@ function getTransitiveDeps(symbol, debug) {
 }
 
 function shouldPreprocess(fileName) {
-  var content = read(fileName).trim();
+  var content = readFile(fileName).trim();
   return content.startsWith('#preprocess\n') || content.startsWith('#preprocess\r\n');
 }
 
-function getIncludeFile(fileName, needsPreprocess) {
-  let result = `// include: ${fileName}\n`;
-  if (needsPreprocess) {
+function getIncludeFile(fileName, alwaysPreprocess, shortName) {
+  shortName ??= fileName;
+  let result = `// include: ${shortName}\n`;
+  const doPreprocess = alwaysPreprocess || shouldPreprocess(fileName);
+  if (doPreprocess) {
     result += processMacros(preprocess(fileName), fileName);
   } else {
-    result += read(fileName);
+    result += readFile(fileName);
   }
-  result += `// end include: ${fileName}\n`;
+  result += `// end include: ${shortName}\n`;
   return result;
+}
+
+function getSystemIncludeFile(fileName) {
+  return getIncludeFile(localFile(fileName), /*alwaysPreprocess=*/ true, /*shortName=*/ fileName);
 }
 
 function preJS() {
   let result = '';
   for (const fileName of PRE_JS_FILES) {
-    result += getIncludeFile(fileName, shouldPreprocess(fileName));
+    result += getIncludeFile(fileName);
   }
   return result;
 }
 
-export function runJSify(symbolsOnly) {
+export async function runJSify(outputFile, symbolsOnly) {
   const libraryItems = [];
   const symbolDeps = {};
   const asyncFuncs = [];
   let postSets = [];
 
   LibraryManager.load();
+
+  let outputHandle = process.stdout;
+  if (outputFile) {
+    outputHandle = await fs.open(outputFile, 'w');
+  }
+
+  async function writeOutput(str) {
+    await outputHandle.write(str + '\n');
+  }
 
   const symbolsNeeded = DEFAULT_LIBRARY_FUNCS_TO_INCLUDE;
   symbolsNeeded.push(...extraLibraryFuncs);
@@ -232,22 +251,23 @@ export function runJSify(symbolsOnly) {
       }
 
       if ((sig[0] == 'j' && i53abi) || (sig[0] == 'p' && MEMORY64)) {
+        const await_ = async_ ? 'await ' : '';
         // For functions that where we need to mutate the return value, we
         // also need to wrap the body in an inner function.
         if (oneliner) {
           if (argConversions) {
             return `${async_}(${args}) => {
 ${argConversions}
-  return ${makeReturn64(body)};
+  return ${makeReturn64(await_ + body)};
 }`;
           }
-          return `${async_}(${args}) => ${makeReturn64(body)};`;
+          return `${async_}(${args}) => ${makeReturn64(await_ + body)};`;
         }
         return `\
 ${async_}function(${args}) {
 ${argConversions}
   var ret = (() => { ${body} })();
-  return ${makeReturn64('ret')};
+  return ${makeReturn64(await_ + 'ret')};
 }`;
       }
 
@@ -284,21 +304,35 @@ ${argConversions}
 
     // apply LIBRARY_DEBUG if relevant
     if (LIBRARY_DEBUG && !isJsOnlySymbol(symbol)) {
-      snippet = modifyJSFunction(
-        snippet,
-        (args, body, async) => `\
+      snippet = modifyJSFunction(snippet, (args, body, _async, oneliner) => {
+        var run_func;
+        if (oneliner) {
+          run_func = `var ret = ${body}`;
+        } else {
+          run_func = `var ret = (() => { ${body} })();`;
+        }
+        return `\
 function(${args}) {
-  var ret = (() => { if (runtimeDebug) err("[library call:${mangled}: " + Array.prototype.slice.call(arguments).map(prettyPrint) + "]");
-  ${body}
-  })();
-  if (runtimeDebug && typeof ret != "undefined") err("  [     return:" + prettyPrint(ret));
+  if (runtimeDebug) err("[library call:${mangled}: " + Array.prototype.slice.call(arguments).map(prettyPrint) + "]");
+  ${run_func}
+  if (runtimeDebug) err("  [     return:" + prettyPrint(ret));
   return ret;
-}`,
-      );
+}`;
+      });
     }
 
     const sig = LibraryManager.library[symbol + '__sig'];
     const i53abi = LibraryManager.library[symbol + '__i53abi'];
+    if (i53abi) {
+      if (!sig) {
+        error(`JS library error: '__i53abi' decorator requires '__sig' decorator: '${symbol}'`);
+      }
+      if (!sig.includes('j')) {
+        error(
+          `JS library error: '__i53abi' only makes sense when '__sig' includes 'j' (int64): '${symbol}'`,
+        );
+      }
+    }
     if (
       sig &&
       ((i53abi && sig.includes('j')) || ((MEMORY64 || CAN_ADDRESS_2GB) && sig.includes('p')))
@@ -312,7 +346,7 @@ function(${args}) {
       if (proxyingMode !== 'sync' && proxyingMode !== 'async' && proxyingMode !== 'none') {
         throw new Error(`Invalid proxyingMode ${symbol}__proxy: '${proxyingMode}' specified!`);
       }
-      if (SHARED_MEMORY) {
+      if (SHARED_MEMORY && proxyingMode != 'none') {
         const sync = proxyingMode === 'sync';
         if (PTHREADS) {
           snippet = modifyJSFunction(snippet, (args, body, async_, oneliner) => {
@@ -324,7 +358,7 @@ function(${args}) {
               MEMORY64 && rtnType == 'p' ? 'proxyToMainThreadPtr' : 'proxyToMainThread';
             deps.push('$' + proxyFunc);
             return `
-function(${args}) {
+${async_}function(${args}) {
 if (ENVIRONMENT_IS_PTHREAD)
   return ${proxyFunc}(${proxiedFunctionTable.length}, 0, ${+sync}${args ? ', ' : ''}${args});
 ${body}
@@ -571,7 +605,7 @@ function(${args}) {
           return dep();
         }
         // $noExitRuntime is special since there are conditional usages of it
-        // in library.js and library_pthread.js.  These happen before deps are
+        // in libcore.js and libpthread.js.  These happen before deps are
         // processed so depending on it via `__deps` doesn't work.
         if (dep === '$noExitRuntime') {
           error(
@@ -623,14 +657,18 @@ function(${args}) {
         //  emits
         //   'var foo = [value];'
         if (typeof snippet == 'string' && snippet[0] == '=') {
-          snippet = snippet.substr(1);
+          snippet = snippet.slice(1);
         }
         contentText = `var ${mangled} = ${snippet};`;
       }
       // asm module exports are done in emscripten.py, after the asm module is ready. Here
       // we also export library methods as necessary.
       if ((EXPORT_ALL || EXPORTED_FUNCTIONS.has(mangled)) && !isStub) {
-        contentText += `\nModule['${mangled}'] = ${mangled};`;
+        if (MODULARIZE === 'instance') {
+          contentText += `\n__exp_${mangled} = ${mangled};`;
+        } else {
+          contentText += `\nModule['${mangled}'] = ${mangled};`;
+        }
       }
       // Relocatable code needs signatures to create proper wrappers.
       if (sig && RELOCATABLE) {
@@ -679,8 +717,12 @@ function(${args}) {
     libraryItems.push(JS);
   }
 
-  function includeFile(fileName, needsPreprocess = true) {
-    print(getIncludeFile(fileName, needsPreprocess));
+  function includeSystemFile(fileName) {
+    writeOutput(getSystemIncludeFile(fileName));
+  }
+
+  function includeFile(fileName) {
+    writeOutput(getIncludeFile(fileName));
   }
 
   function finalCombiner() {
@@ -706,17 +748,17 @@ function(${args}) {
     postSets.push(...orderedPostSets);
 
     const shellFile = MINIMAL_RUNTIME ? 'shell_minimal.js' : 'shell.js';
-    includeFile(shellFile);
+    includeSystemFile(shellFile);
 
     const preFile = MINIMAL_RUNTIME ? 'preamble_minimal.js' : 'preamble.js';
-    includeFile(preFile);
+    includeSystemFile(preFile);
 
     for (const item of libraryItems.concat(postSets)) {
-      print(indentify(item || '', 2));
+      writeOutput(indentify(item || '', 2));
     }
 
     if (PTHREADS) {
-      print(`
+      writeOutput(`
 // proxiedFunctionTable specifies the list of functions that can be called
 // either synchronously or asynchronously from other threads in postMessage()d
 // or internally queued events. This way a pthread in a Worker can synchronously
@@ -727,36 +769,39 @@ var proxiedFunctionTable = [
 `);
     }
 
-    if (errorOccured()) {
-      throw Error('Aborting compilation due to previous errors');
-    }
-
     // This is the main 'post' pass. Print out the generated code
     // that we have here, together with the rest of the output
     // that we started to print out earlier (see comment on the
     // "Final shape that will be created").
-    print('// EMSCRIPTEN_END_FUNCS\n');
+    writeOutput('// EMSCRIPTEN_END_FUNCS\n');
 
     const postFile = MINIMAL_RUNTIME ? 'postamble_minimal.js' : 'postamble.js';
-    includeFile(postFile);
+    includeSystemFile(postFile);
 
     for (const fileName of POST_JS_FILES) {
-      includeFile(fileName, shouldPreprocess(fileName));
+      includeFile(fileName);
     }
 
     if (MODULARIZE) {
-      includeFile('postamble_modularize.js');
+      includeSystemFile('postamble_modularize.js');
     }
 
-    print(
+    if (errorOccured()) {
+      throw Error('Aborting compilation due to previous errors');
+    }
+
+    writeOutput(
       '//FORWARDED_DATA:' +
         JSON.stringify({
           librarySymbols,
           warnings: warningOccured(),
           asyncFuncs,
           libraryDefinitions: LibraryManager.libraryDefinitions,
+          ATPRERUNS: ATPRERUNS.join('\n'),
           ATINITS: ATINITS.join('\n'),
-          ATMAINS: STRICT ? '' : ATMAINS.join('\n'),
+          ATPOSTCTORS: ATPOSTCTORS.join('\n'),
+          ATMAINS: ATMAINS.join('\n'),
+          ATPOSTRUNS: ATPOSTRUNS.join('\n'),
           ATEXITS: ATEXITS.join('\n'),
         }),
     );
@@ -767,7 +812,7 @@ var proxiedFunctionTable = [
   }
 
   if (symbolsOnly) {
-    print(
+    writeOutput(
       JSON.stringify({
         deps: symbolDeps,
         asyncFuncs,
@@ -781,6 +826,8 @@ var proxiedFunctionTable = [
   if (errorOccured()) {
     throw Error('Aborting compilation due to previous errors');
   }
+
+  if (outputFile) await outputHandle.close();
 }
 
 addToCompileTimeContext({
